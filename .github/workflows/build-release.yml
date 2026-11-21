@@ -1,0 +1,145 @@
+# Nama workflow yang muncul di GitHub Actions
+name: Build and Release APK
+
+# Menentukan kapan workflow dijalankan
+on:
+  push:
+    # Berjalan ketika ada tag yang diawali v
+    tags:
+      - "v*"
+
+  # Bisa dijalankan manual dari GitHub Actions
+  workflow_dispatch:
+
+# Memberi izin membuat GitHub Release
+permissions:
+  contents: write
+
+# Daftar pekerjaan yang dijalankan
+jobs:
+
+  # Pekerjaan pertama: membangun APK
+  build:
+    name: Build Flutter APK
+
+    # Menggunakan komputer virtual Ubuntu
+    runs-on: ubuntu-latest
+
+    # Mengirim versi ke pekerjaan release
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+
+    steps:
+
+      # Mengambil source code dari repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Menginstal Java
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      # Menginstal Flutter
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.50.1"
+          channel: "stable"
+          cache: true
+
+      # Menginstal dependency Flutter
+      - name: Install Dependencies
+        run: flutter pub get
+
+      # Mengembalikan file Keystore dari GitHub Secret
+      - name: Decode Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+
+      # Membuat key.properties saat build
+      - name: Create key.properties
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          cat > android/key.properties << EOF
+          storePassword=$STORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      # Mengembalikan konfigurasi Firebase
+      - name: Decode Firebase Configuration
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: |
+          echo "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > android/app/google-services.json
+
+      # Membuat APK release
+      - name: Build Release APK
+        run: flutter build apk --release
+
+      # Membaca versi dari pubspec.yaml
+      - name: Get Version
+        id: get_version
+        run: |
+          VERSION=$(grep '^version: ' pubspec.yaml | cut -d ' ' -f 2 | cut -d '+' -f 1)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # Menyimpan APK sebagai GitHub Actions artifact
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: todo-${{ steps.get_version.outputs.version }}
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  # Pekerjaan kedua: membuat GitHub Release
+  release:
+    name: Create GitHub Release
+
+    # Menunggu pekerjaan build selesai
+    needs: build
+
+    runs-on: ubuntu-latest
+
+    # Hanya membuat release untuk tag versi
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+
+      # Mengambil source code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Mengambil APK hasil pekerjaan build
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: todo-${{ needs.build.outputs.version }}
+          path: ./
+
+      # Membuat halaman GitHub Release
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: app-release.apk
+          body: |
+            ## ToDo v${{ needs.build.outputs.version }}
+
+            ### Download
+            Download APK dan instal di perangkat Android.
+
+            ### Informasi
+            - Build otomatis menggunakan GitHub Actions
+            - APK ditandatangani dengan release keystore
+          draft: false
+          prerelease: false
+        env:
